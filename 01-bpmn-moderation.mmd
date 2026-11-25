@@ -1,0 +1,97 @@
+---
+title: "BPMN. Авито: автоматическая пре-модерация нового объявления перед публикацией"
+config:
+  layout: elk
+  elk:
+    nodePlacementStrategy: BRANDES_KOEPF
+---
+flowchart LR
+  subgraph L1["👤 Продавец"]
+    S1(("Продавец нажал<br/>«Разместить<br/>объявление»"))
+    E_PUB((("Объявление<br/>опубликовано")))
+    E_REJ((("Продавец получил<br/>отказ с причиной")))
+  end
+  subgraph L2["🏢 Платформа объявлений Авито"]
+    P1("P1. Сохранить объявление<br/>со статусом «На проверке»")
+    P2("P2. Отправить событие<br/>item.created на модерацию")
+    G8{"G8. Вердикт?"}
+    P3("P3. Опубликовать<br/>объявление в поиске")
+    P4("P4. Отправить продавцу<br/>причину отказа")
+  end
+  subgraph L3["⚙️ Система модерации: Оркестратор модерации"]
+    O1("O1. Проверить<br/>жёсткие правила")
+    G1{"G1. Нарушено<br/>жёсткое правило?"}
+    O2("O2. Запросить<br/>оценку модели")
+    G2{"G2. Ответ модели<br/>за ≤ 500 мс?"}
+    G3{"G3. Сравнить score<br/>с порогами"}
+    O3("O3. Поставить в очередь<br/>ручной проверки")
+    O4("O4. Записать вердикт,<br/>score и версию модели")
+    GP{{"+"}}
+    O5("O5. Отправить вердикт<br/>платформе")
+    G6{"G6. Нужна метка<br/>для обучения?"}
+    E_NOLBL((("Решение принято<br/>без метки")))
+  end
+  subgraph L4["🤖 Система модерации: ML-сервис оценки объявлений"]
+    M1("M1. Собрать признаки<br/>объявления и продавца")
+    M2["M2. Рассчитать вероятность<br/>нарушения — ВЫЗОВ МОДЕЛИ"]
+  end
+  subgraph L5["🧑‍💼 Модератор"]
+    H1("H1. Проверить объявление<br/>вручную")
+    G5{"G5. Есть<br/>нарушение?"}
+    H2("H2. Проверить авто-решение<br/>(контрольная выборка)")
+  end
+  subgraph L6["📚 Система модерации: контур обучения"]
+    T1("T1. Сохранить метку<br/>в датасет разметки")
+    E_LBL((("Метка передана<br/>в следующее обучение")))
+  end
+  S1 --> P1 --> P2 --> O1 --> G1
+  G1 -- "да: стоп-слово /<br/>продавец в бан-листе" --> O4
+  G1 -- "нет" --> O2 --> M1 --> M2 -- "score, класс нарушения,<br/>версия модели" --> G2
+  G2 -- "да" --> G3
+  G3 -- "score ≥ 0.92:<br/>авто-отклонить" --> O4
+  G3 -- "score ≤ 0.15:<br/>авто-опубликовать" --> O4
+  G2 -. "нет: таймаут / ошибка<br/>(модель недоступна)" .-> O3
+  G3 -. "0.15 < score < 0.92:<br/>серая зона" .-> O3
+  O3 -.-> H1 -.-> G5
+  G5 -. "да → отклонить<br/>нет → опубликовать" .-> O4
+  O4 --> GP --> O5 --> G8
+  G8 -- "опубликовать" --> P3 --> E_PUB
+  G8 -- "отклонить" --> P4 --> E_REJ
+  GP ==> G6
+  G6 == "решение модератора" ==> T1
+  G6 == "авто-решение попало<br/>в случайные 2%" ==> H2 ==> T1
+  G6 -- "иначе" --> E_NOLBL
+  T1 ==> E_LBL
+
+  subgraph LEG["Легенда: BPMN-элементы в синтаксисе Mermaid"]
+    direction LR
+    k1(("Стартовое<br/>событие")) ~~~ k2((("Конечное<br/>событие"))) ~~~ k3("Задача") ~~~ k4["Задача с вызовом<br/>ML-модели"] ~~~ k5{"Исключающий<br/>шлюз XOR"} ~~~ k6{{"+ параллельный<br/>шлюз AND"}}
+    k7["── сплошная: основной поток<br/>┄┄ пунктир: запасной путь<br/>━━ жирная: метка для обучения<br/>(дорожка = рамка subgraph)"]
+    k6 ~~~ k7
+  end
+
+  classDef start fill:#d9f7d9,stroke:#2e7d32,stroke-width:2px,color:#111;
+  classDef finish fill:#fde0e0,stroke:#c62828,stroke-width:4px,color:#111;
+  classDef task fill:#ffffff,stroke:#455a64,stroke-width:1.5px,color:#111;
+  classDef ml fill:#ffe08a,stroke:#e65100,stroke-width:4px,color:#111,font-weight:bold;
+  classDef gw fill:#fffde7,stroke:#8d6e00,stroke-width:1.5px,color:#111;
+  classDef fallback fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#111;
+  classDef feedback fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#111;
+  classDef note fill:#ffffff,stroke:#bbbbbb,color:#111,text-align:left;
+
+  class S1,k1 start;
+  class E_PUB,E_REJ,E_NOLBL,E_LBL,k2 finish;
+  class P1,P2,P3,P4,O1,O2,O4,O5,M1,k3 task;
+  class M2,k4 ml;
+  class G1,G2,G3,G5,G6,G8,GP,k5,k6 gw;
+  class O3,H1 fallback;
+  class H2,T1 feedback;
+  class k7 note;
+
+  style L1 fill:#eef4ff,stroke:#5c7cfa,stroke-width:2px
+  style L2 fill:#f5f5f5,stroke:#757575,stroke-width:2px
+  style L3 fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px
+  style L4 fill:#fff8e1,stroke:#e69500,stroke-width:2px
+  style L5 fill:#fbf0fc,stroke:#8e24aa,stroke-width:2px
+  style L6 fill:#f1f8e9,stroke:#43a047,stroke-width:2px
+  style LEG fill:#fafafa,stroke:#9e9e9e,stroke-dasharray: 5 5

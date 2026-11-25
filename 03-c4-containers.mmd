@@ -1,0 +1,81 @@
+---
+title: "C4 · Уровень 2 · Containers — Система модерации объявлений Авито"
+config:
+  layout: elk
+---
+flowchart LR
+  moderator["<b>Модератор</b><br/><i>[Person]</i>"]
+  mleng["<b>ML-инженер команды модерации</b><br/><i>[Person]</i>"]
+
+  platform["<b>Платформа объявлений Авито</b><br/><i>[Software System, внешняя]</i>"]
+  media["<b>Хранилище медиа</b><br/><i>[Software System, внешняя]</i>"]
+  profile["<b>Профиль и история продавца</b><br/><i>[Software System, внешняя]</i>"]
+  complaints["<b>Сервис жалоб и апелляций</b><br/><i>[Software System, внешняя]</i>"]
+
+  subgraph SYS["Система модерации объявлений  [Software System]"]
+    kafka[["<b>Шина событий модерации</b><br/><i>[Container: Apache Kafka]</i><br/>Топики: item.created,<br/>moderation.verdict,<br/>moderation.predictions"]]
+    orch["<b>Оркестратор модерации</b><br/><i>[Container: Go]</i><br/>Жёсткие правила, вызов модели,<br/>пороги, маршрутизация,<br/>контрольная выборка 2%<br/><b>BPMN: O1–O5, G1–G3, G6</b>"]
+    mlsvc["<b>ML-сервис оценки объявлений</b><br/><i>[Container: Python, FastAPI,<br/>ONNX Runtime, GPU]</i><br/>Собирает признаки и считает<br/>вероятность нарушения<br/><b>BPMN: M1, M2</b>"]
+    fsonline[("<b>Online Feature Store</b><br/><i>[Container: Redis]</i><br/>Признаки продавца по seller_id")]
+    featpipe["<b>Расчёт признаков</b><br/><i>[Container: Spark + Airflow]</i><br/>Агрегаты по продавцу,<br/>раз в 15 минут"]
+    registry[("<b>Реестр моделей</b><br/><i>[Container: MLflow Model<br/>Registry + S3]</i><br/>Версии, метрики, алиасы<br/>production / previous")]
+    verdictdb[("<b>БД вердиктов</b><br/><i>[Container: PostgreSQL]</i><br/>Вердикт, score, причина,<br/>версия модели<br/><b>BPMN: O4</b>")]
+    review["<b>Сервис ручной проверки</b><br/><i>[Container: Go + PostgreSQL]</i><br/>Очередь заданий модераторам,<br/>SLA, приоритеты<br/><b>BPMN: O3, H1, H2</b>"]
+    modui["<b>Интерфейс модератора</b><br/><i>[Container: React SPA]</i><br/>Карточка объявления,<br/>кнопки вердикта<br/><b>BPMN: H1, H2, G5</b>"]
+    labels[("<b>Хранилище разметки и датасетов</b><br/><i>[Container: ClickHouse + S3]</i><br/>Метки, лог предсказаний,<br/>офлайн-признаки<br/><b>BPMN: T1</b>")]
+    train["<b>Пайплайн переобучения</b><br/><i>[Container: Airflow + PyTorch, GPU]</i><br/>Раз в неделю: обучение,<br/>оценка на отложенной выборке"]
+  end
+
+  %% --- основной путь процесса ---
+  platform -- "1. Публикует item.created" --> kafka
+  kafka -- "2. Читает item.created" --> orch
+  orch -- "3. POST /v1/score<br/>(HTTP, таймаут 500 мс)" --> mlsvc
+  mlsvc -- "4. Читает признаки<br/>продавца по seller_id" --> fsonline
+  mlsvc -- "5. Скачивает фото<br/>по ссылкам (HTTPS)" --> media
+  mlsvc -- "6. Ответ: score, класс<br/>нарушения, версия модели" --> orch
+  orch -- "7. Пишет вердикт,<br/>score, версию" --> verdictdb
+  orch -- "8. Публикует<br/>moderation.verdict" --> kafka
+  kafka -- "9. Читает вердикт" --> platform
+
+  %% --- запасной путь: человек ---
+  orch -. "Создаёт задание: серая зона,<br/>модель недоступна, контроль 2%" .-> review
+  moderator -. "Проверяет объявления" .-> modui
+  modui -. "Берёт задание,<br/>отправляет решение (REST)" .-> review
+  review -. "Решение модератора" .-> orch
+
+  %% --- признаки ---
+  profile -- "События профиля<br/>и блокировок" --> featpipe
+  featpipe -- "Обновляет онлайн-признаки" --> fsonline
+  featpipe -- "Офлайн-признаки<br/>на момент события" --> labels
+
+  %% --- обратная связь и обучение ---
+  review == "Метка: решение модератора" ==> labels
+  complaints == "Метки из жалоб<br/>и апелляций" ==> labels
+  kafka == "Лог предсказаний<br/>и вердиктов" ==> labels
+  mlsvc -- "Пишет лог предсказаний<br/>moderation.predictions" --> kafka
+  train == "Читает датасет:<br/>метки + признаки" ==> labels
+  train == "Регистрирует кандидата<br/>с метриками" ==> registry
+  mleng -- "Переводит кандидата<br/>в production" --> registry
+  mlsvc -- "Загружает production-<br/>и previous-версию модели" --> registry
+
+  subgraph LEG["Легенда"]
+    direction LR
+    l1["Человек"] ~~~ l2["Контейнер<br/>(сервис)"] ~~~ l3[("Хранилище")] ~~~ l4[["Очередь /<br/>шина событий"]] ~~~ l5["Внешняя<br/>система"]
+    l6["── основной путь (номера = порядок шагов)<br/>┄┄ запасной путь через человека<br/>━━ данные для переобучения<br/>BPMN: … = задачи BPMN, которые выполняет контейнер"]
+    l5 ~~~ l6
+  end
+
+  classDef person fill:#08427b,stroke:#052e56,color:#ffffff;
+  classDef container fill:#438dd5,stroke:#2e6295,color:#ffffff;
+  classDef mlc fill:#e65100,stroke:#a63a00,color:#ffffff,stroke-width:3px;
+  classDef db fill:#438dd5,stroke:#2e6295,color:#ffffff;
+  classDef ext fill:#8c8c8c,stroke:#6b6b6b,color:#ffffff;
+  classDef note fill:#ffffff,stroke:#bbbbbb,color:#111;
+  class moderator,mleng,l1 person;
+  class kafka,orch,featpipe,review,modui,train,l2,l4 container;
+  class fsonline,registry,verdictdb,labels,l3 db;
+  class mlsvc mlc;
+  class platform,media,profile,complaints,l5 ext;
+  class l6 note;
+  style SYS fill:#f4f8fd,stroke:#1168bd,stroke-width:2px,stroke-dasharray: 8 4
+  style LEG fill:#fafafa,stroke:#9e9e9e,stroke-dasharray: 5 5

@@ -1,0 +1,47 @@
+---
+title: "C4 · Уровень 1 · System Context — Система модерации объявлений Авито"
+config:
+  layout: elk
+---
+flowchart LR
+  seller["<b>Продавец</b><br/><i>[Person]</i><br/>Частное лицо или магазин,<br/>размещает объявление"]
+  moderator["<b>Модератор</b><br/><i>[Person]</i><br/>Сотрудник Авито,<br/>проверяет спорные объявления"]
+  mleng["<b>ML-инженер команды модерации</b><br/><i>[Person]</i><br/>Следит за качеством модели,<br/>выпускает новые версии"]
+
+  modsys["<b>Система модерации объявлений</b><br/><i>[Software System]</i><br/>Решает по каждому новому объявлению:<br/>опубликовать, отклонить или отдать человеку.<br/>Копит разметку и переобучает модель"]
+
+  platform["<b>Платформа объявлений Авито</b><br/><i>[Software System, внешняя]</i><br/>Принимает объявления, хранит их,<br/>публикует в поиске"]
+  notify["<b>Сервис уведомлений</b><br/><i>[Software System, внешняя]</i><br/>Push, e-mail, сообщения в приложении"]
+  media["<b>Хранилище медиа</b><br/><i>[Software System, внешняя]</i><br/>Фотографии объявлений"]
+  profile["<b>Профиль и история продавца</b><br/><i>[Software System, внешняя]</i><br/>Возраст аккаунта, прошлые объявления<br/>и блокировки"]
+  complaints["<b>Сервис жалоб и апелляций</b><br/><i>[Software System, внешняя]</i><br/>Жалобы покупателей, споры продавцов<br/>с решением модерации"]
+
+  seller -- "Подаёт объявление:<br/>текст, фото, категория, цена" --> platform
+  platform -- "Новое объявление на проверку<br/>(событие item.created)" --> modsys
+  modsys -- "Вердикт: опубликовать / отклонить<br/>+ код причины" --> platform
+  platform -- "Просит сообщить продавцу<br/>результат проверки" --> notify
+  notify -- "«Объявление опубликовано»<br/>или причина отказа" --> seller
+
+  media -- "Фото объявления по ссылке" --> modsys
+  profile -- "События профиля и истории<br/>продавца для признаков" --> modsys
+  complaints -- "Итоги жалоб и апелляций<br/>(дополнительные метки)" --> modsys
+
+  moderator -- "Ставит вердикт по объявлениям<br/>из серой зоны и контрольной выборки" --> modsys
+  mleng -- "Смотрит метрики, переводит<br/>новую версию модели в прод" --> modsys
+
+  subgraph LEG["Легенда"]
+    direction LR
+    lp["Человек<br/>[Person]"] ~~~ ls["Рассматриваемая<br/>система"] ~~~ le["Внешняя<br/>система"]
+    la["Стрелка: кто кому что передаёт<br/>(подпись = данные / действие)"]
+    le ~~~ la
+  end
+
+  classDef person fill:#08427b,stroke:#052e56,color:#ffffff;
+  classDef focus fill:#1168bd,stroke:#0b4884,color:#ffffff,stroke-width:3px;
+  classDef ext fill:#8c8c8c,stroke:#6b6b6b,color:#ffffff;
+  classDef note fill:#ffffff,stroke:#bbbbbb,color:#111;
+  class seller,moderator,mleng,lp person;
+  class modsys,ls focus;
+  class platform,notify,media,profile,complaints,le ext;
+  class la note;
+  style LEG fill:#fafafa,stroke:#9e9e9e,stroke-dasharray: 5 5

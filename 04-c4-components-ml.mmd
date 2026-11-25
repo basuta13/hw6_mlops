@@ -1,0 +1,70 @@
+---
+title: "C4 · Уровень 3 · Components — ML-сервис оценки объявлений"
+config:
+  layout: elk
+---
+flowchart LR
+  orch["<b>Оркестратор модерации</b><br/><i>[Container: Go]</i><br/>вызывает сервис из задачи BPMN O2,<br/>ответ уходит в шлюзы G2 / G3"]
+  fsonline[("<b>Online Feature Store</b><br/><i>[Container: Redis]</i>")]
+  media["<b>Хранилище медиа</b><br/><i>[Software System, внешняя]</i>"]
+  registry[("<b>Реестр моделей</b><br/><i>[Container: MLflow + S3]</i>")]
+  kafka[["<b>Шина событий модерации</b><br/><i>[Container: Apache Kafka]</i>"]]
+
+  subgraph MLB["ML-сервис оценки объявлений  [Container: Python, FastAPI, ONNX Runtime, GPU]"]
+    api["<b>Scoring API</b><br/><i>[Component: FastAPI, POST /v1/score]</i><br/>Проверяет запрос, держит<br/>внутренний дедлайн 450 мс"]
+
+    subgraph FEAT["Подготовка признаков — BPMN M1"]
+      featasm["<b>Сборщик признаков продавца</b><br/><i>[Component: Python, redis-py]</i><br/>Возраст аккаунта, число отказов,<br/>жалоб за 30 дней; дефолты,<br/>если признака нет"]
+      txtprep["<b>Препроцессор текста</b><br/><i>[Component: Python, tokenizer]</i><br/>Заголовок + описание + категория<br/>→ токены (до 256)"]
+      imgprep["<b>Загрузчик фото</b><br/><i>[Component: Python, httpx, Pillow]</i><br/>До 5 фото, resize 224×224,<br/>таймаут 150 мс на фото"]
+    end
+
+    subgraph INF["Инференс — BPMN M2 (вызов модели)"]
+      txtenc["<b>Текстовый энкодер</b><br/><i>[Component: ONNX Runtime,<br/>BERT-подобная модель]</i><br/>Эмбеддинг текста"]
+      imgenc["<b>Энкодер изображений</b><br/><i>[Component: ONNX Runtime,<br/>ViT / CLIP-подобная модель]</i><br/>Эмбеддинги фото, max-pooling"]
+      head["<b>Классификатор нарушений</b><br/><i>[Component: CatBoost]</i><br/>Эмбеддинги + признаки продавца<br/>→ вероятность по 5 классам"]
+      post["<b>Калибровка и ответ</b><br/><i>[Component: Python, isotonic]</i><br/>score = max p, reason_code = argmax,<br/>+ версия модели"]
+    end
+
+    resolver["<b>Резолвер версии модели</b><br/><i>[Component: MLflow client]</i><br/>Держит в памяти production<br/>и previous; проверяет реестр<br/>раз в 5 мин; при ошибке загрузки<br/>остаётся на previous"]
+    plog["<b>Логгер предсказаний</b><br/><i>[Component: Kafka producer, async]</i><br/>request_id, признаки, вероятности,<br/>версия модели"]
+  end
+
+  orch -- "1. POST /v1/score: item_id, seller_id,<br/>текст, категория, ссылки на фото" --> api
+  api -- "2. seller_id" --> featasm
+  api -- "2. текст, категория" --> txtprep
+  api -- "2. ссылки на фото" --> imgprep
+  featasm -- "Читает признаки<br/>HGETALL seller:{id}" --> fsonline
+  imgprep -- "Скачивает фото (HTTPS)" --> media
+  txtprep -- "3. токены" --> txtenc
+  imgprep -- "3. тензоры фото" --> imgenc
+  txtenc -- "4. эмбеддинг текста" --> head
+  imgenc -- "4. эмбеддинг фото" --> head
+  featasm -- "4. признаки продавца" --> head
+  head -- "5. вероятности классов" --> post
+  post -- "6. score, reason_code,<br/>model_version" --> api
+  api -- "7. Ответ в процесс:<br/>score, reason_code, model_version<br/>→ шлюзы G2 / G3 в BPMN" --> orch
+  post -- "Копия ответа и признаков" --> plog
+  plog -- "Пишет в moderation.predictions" --> kafka
+  resolver -- "Загружает артефакты<br/>по алиасам production / previous" --> registry
+  resolver -. "Подставляет веса выбранной версии" .-> INF
+
+  subgraph LEG["Легенда"]
+    direction LR
+    g1["Компонент<br/>ML-сервиса"] ~~~ g2["Соседний контейнер<br/>/ внешняя система"] ~~~ g3[("Хранилище")] ~~~ g4[["Шина событий"]]
+    g5["Номера на стрелках = порядок одного вызова.<br/>Пунктир = управление версией модели.<br/>Рамки «M1» и «M2» = задачи BPMN"]
+    g4 ~~~ g5
+  end
+
+  classDef comp fill:#85bbf0,stroke:#5d82a8,color:#000000;
+  classDef mlcore fill:#ffcc80,stroke:#e65100,color:#000000,stroke-width:2px;
+  classDef neigh fill:#999999,stroke:#6b6b6b,color:#ffffff;
+  classDef note fill:#ffffff,stroke:#bbbbbb,color:#111;
+  class api,featasm,txtprep,imgprep,resolver,plog,g1 comp;
+  class txtenc,imgenc,head,post mlcore;
+  class orch,fsonline,media,registry,kafka,g2,g3,g4 neigh;
+  class g5 note;
+  style MLB fill:#fff8f0,stroke:#e65100,stroke-width:2px,stroke-dasharray: 8 4
+  style FEAT fill:#eef5fc,stroke:#5d82a8
+  style INF fill:#fff3e0,stroke:#e65100
+  style LEG fill:#fafafa,stroke:#9e9e9e,stroke-dasharray: 5 5
